@@ -1,20 +1,19 @@
 """
 SpeedyTest - A polished speed testing application
 Similar to Ookla's Speedtest but with a modern KivyMD interface
+Android-compatible version
 """
 
 import threading
-import time
+import json
+import os
 from datetime import datetime
 from collections import deque
 
 from kivy.core.window import Window
-from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.gridlayout import GridLayout
-from kivy.uix.scrollview import ScrollView
-from kivy.garden.matplotlib.backend_kivyagg import FigureCanvasKivyAgg
 from kivy.clock import Clock, mainthread
 from kivy.metrics import dp
+from kivy.uix.popup import Popup
 
 from kivymd.app import MDApp
 from kivymd.uix.screen import MDScreen
@@ -26,18 +25,15 @@ from kivymd.uix.progressbar import MDProgressBar
 from kivymd.uix.scrollview import MDScrollView
 from kivymd.uix.gridlayout import MDGridLayout
 from kivymd.uix.boxlayout import MDBoxLayout
-from kivymd.uix.dialog import MDDialog
-from kivymd.uix.selectioncontrol import MDCheckbox
 from kivymd.uix.list import MDList, OneLineListItem
 from kivymd.uix.divider import MDDivider
-from kivymd.uix.textfield import MDTextField
-from kivymd.theme_manager import ThemeManager
+from kivymd.uix.spinner import MDSpinner
+from kivy.uix.image import Image
 
-import speedtest as st
-import matplotlib.pyplot as plt
-from matplotlib.figure import Figure
-import io
-
+try:
+    import speedtest
+except ImportError:
+    speedtest = None
 
 Window.size = (400, 800)
 
@@ -60,15 +56,46 @@ class SpeedtestEngine:
         self.history = deque(maxlen=10)
         self.current_progress = 0
         self.status_message = ""
+        self.load_history()
+        
+    def load_history(self):
+        """Load history from file"""
+        try:
+            history_file = self.get_history_path()
+            if os.path.exists(history_file):
+                with open(history_file, 'r') as f:
+                    saved_history = json.load(f)
+                    self.history = deque(saved_history, maxlen=10)
+        except Exception as e:
+            print(f"Error loading history: {e}")
+    
+    def save_history(self):
+        """Save history to file"""
+        try:
+            history_file = self.get_history_path()
+            os.makedirs(os.path.dirname(history_file), exist_ok=True)
+            with open(history_file, 'w') as f:
+                json.dump(list(self.history), f)
+        except Exception as e:
+            print(f"Error saving history: {e}")
+    
+    @staticmethod
+    def get_history_path():
+        """Get path for history file"""
+        app_dir = os.path.expanduser('~/.speedytest')
+        return os.path.join(app_dir, 'history.json')
         
     def get_best_server(self, callback=None):
         """Find the best server"""
         try:
+            if speedtest is None:
+                raise Exception("speedtest module not installed")
+            
             self.status_message = "Finding best server..."
             if callback:
                 callback(self.status_message, 10)
             
-            self.speedtest = st.Speedtest()
+            self.speedtest = speedtest.Speedtest()
             self.speedtest.get_servers()
             self.speedtest.get_best_server()
             
@@ -78,6 +105,7 @@ class SpeedtestEngine:
                 
         except Exception as e:
             self.status_message = f"Error: {str(e)}"
+            print(f"Server error: {e}")
             if callback:
                 callback(self.status_message, 0)
     
@@ -88,11 +116,15 @@ class SpeedtestEngine:
             if callback:
                 callback(self.status_message, 30)
             
-            self.speedtest.download(callback=lambda speed: self._update_progress(speed, callback, 30, 60))
+            self.speedtest.download()
             self.results['download'] = self.speedtest.results.download / 1_000_000  # Convert to Mbps
+            
+            if callback:
+                callback(self.status_message, 60)
             
         except Exception as e:
             self.status_message = f"Download error: {str(e)}"
+            print(f"Download error: {e}")
     
     def test_upload(self, callback=None):
         """Test upload speed"""
@@ -101,11 +133,15 @@ class SpeedtestEngine:
             if callback:
                 callback(self.status_message, 60)
             
-            self.speedtest.upload(callback=lambda speed: self._update_progress(speed, callback, 60, 90))
+            self.speedtest.upload()
             self.results['upload'] = self.speedtest.results.upload / 1_000_000  # Convert to Mbps
+            
+            if callback:
+                callback(self.status_message, 90)
             
         except Exception as e:
             self.status_message = f"Upload error: {str(e)}"
+            print(f"Upload error: {e}")
     
     def get_ping(self):
         """Get ping value"""
@@ -113,13 +149,7 @@ class SpeedtestEngine:
             self.results['ping'] = self.speedtest.results.ping
         except Exception as e:
             self.status_message = f"Ping error: {str(e)}"
-    
-    def _update_progress(self, speed, callback, start, end):
-        """Update progress during speed tests"""
-        if callback:
-            progress = start + (end - start) * 0.5
-            self.current_progress = int(progress)
-            callback(self.status_message, self.current_progress)
+            print(f"Ping error: {e}")
     
     def run_full_test(self, callback=None):
         """Run complete speed test"""
@@ -127,6 +157,13 @@ class SpeedtestEngine:
         self.current_progress = 0
         
         try:
+            if speedtest is None:
+                self.status_message = "speedtest-cli not installed"
+                if callback:
+                    callback(self.status_message, 0)
+                self.is_testing = False
+                return False
+            
             # Get best server
             self.get_best_server(callback)
             
@@ -141,12 +178,18 @@ class SpeedtestEngine:
             
             # Store results
             self.results['timestamp'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            self.results['server'] = self.speedtest.get_best_server()['sponsor']
+            try:
+                server_info = self.speedtest.get_best_server()
+                self.results['server'] = server_info.get('sponsor', 'Unknown')
+            except:
+                self.results['server'] = 'Unknown'
+            
             self.results['isp'] = self.speedtest.results.isp
             self.results['ip'] = self.speedtest.results.ip
             
             # Save to history
             self.history.append(self.results.copy())
+            self.save_history()
             
             self.status_message = "Test complete!"
             self.current_progress = 100
@@ -158,6 +201,9 @@ class SpeedtestEngine:
             
         except Exception as e:
             self.status_message = f"Test failed: {str(e)}"
+            print(f"Test error: {e}")
+            if callback:
+                callback(self.status_message, 0)
             self.is_testing = False
             return False
 
@@ -174,6 +220,7 @@ class ResultsCard(MDCard):
         self.height = dp(120)
         self.radius = [dp(15)]
         self.elevation = 2
+        self.md_bg_color = (1, 1, 1, 1)
         
         # Title
         title_label = MDLabel(
@@ -186,15 +233,15 @@ class ResultsCard(MDCard):
         self.add_widget(title_label)
         
         # Value
-        value_label = MDLabel(
-            text=f"{value}",
+        self.value_label = MDLabel(
+            text=str(value),
             font_style='H3',
             theme_text_color='Primary',
             bold=True,
             size_hint_y=None,
             height=dp(50)
         )
-        self.add_widget(value_label)
+        self.add_widget(self.value_label)
         
         # Unit
         unit_label = MDLabel(
@@ -205,6 +252,10 @@ class ResultsCard(MDCard):
             height=dp(20)
         )
         self.add_widget(unit_label)
+    
+    def update_value(self, value):
+        """Update the value label"""
+        self.value_label.text = str(value)
 
 
 class HomeScreen(MDScreen):
@@ -218,7 +269,8 @@ class HomeScreen(MDScreen):
         main_layout = MDBoxLayout(
             orientation='vertical',
             padding=dp(15),
-            spacing=dp(10)
+            spacing=dp(10),
+            md_bg_color=(0.95, 0.95, 0.95, 1)
         )
         
         # Header
@@ -238,57 +290,66 @@ class HomeScreen(MDScreen):
             cols=2,
             spacing=dp(10),
             padding=dp(0),
-            size_hint_y=None,
-            height=dp(500)
+            size_hint_y=None
         )
         scroll_content.bind(minimum_height=scroll_content.setter('height'))
         
         self.download_card = ResultsCard(
             title="DOWNLOAD",
-            value="-- ",
+            value="--",
             unit="Mbps"
         )
         scroll_content.add_widget(self.download_card)
         
         self.upload_card = ResultsCard(
             title="UPLOAD",
-            value="-- ",
+            value="--",
             unit="Mbps"
         )
         scroll_content.add_widget(self.upload_card)
         
         self.ping_card = ResultsCard(
             title="PING",
-            value="-- ",
+            value="--",
             unit="ms"
         )
         scroll_content.add_widget(self.ping_card)
         
-        self.jitter_card = ResultsCard(
-            title="JITTER",
-            value="-- ",
-            unit="ms"
+        self.server_card = ResultsCard(
+            title="SERVER",
+            value="--",
+            unit=""
         )
-        scroll_content.add_widget(self.jitter_card)
+        scroll_content.add_widget(self.server_card)
         
         scroll.add_widget(scroll_content)
         main_layout.add_widget(scroll)
         
         # Status and progress
+        status_box = MDBoxLayout(
+            orientation='vertical',
+            size_hint_y=None,
+            height=dp(60),
+            spacing=dp(5)
+        )
+        
         self.status_label = MDLabel(
             text="Ready to test",
             font_style='Body2',
             theme_text_color='Hint',
             size_hint_y=None,
-            height=dp(30)
+            height=dp(25)
         )
-        main_layout.add_widget(self.status_label)
+        status_box.add_widget(self.status_label)
         
         self.progress_bar = MDProgressBar(
             size_hint_y=None,
-            height=dp(4)
+            height=dp(4),
+            value=0
         )
-        main_layout.add_widget(self.progress_bar)
+        status_box.add_widget(self.progress_bar)
+        
+        main_layout.add_widget(status_box)
         
         # Buttons
         button_layout = MDBoxLayout(
@@ -320,7 +381,14 @@ class HomeScreen(MDScreen):
         if self.engine.is_testing:
             return
         
+        if speedtest is None:
+            self.status_label.text = "Error: speedtest-cli not installed"
+            return
+        
         self.test_button.disabled = True
+        self.status_label.text = "Initializing test..."
+        self.progress_bar.value = 0
+        
         self.test_thread = threading.Thread(target=self._run_test_thread, daemon=True)
         self.test_thread.start()
     
@@ -337,16 +405,21 @@ class HomeScreen(MDScreen):
         
         # Update cards with current results
         if self.engine.results['download']:
-            self.download_card.children[1].text = f"{self.engine.results['download']:.2f}"
+            self.download_card.update_value(f"{self.engine.results['download']:.2f}")
         if self.engine.results['upload']:
-            self.upload_card.children[1].text = f"{self.engine.results['upload']:.2f}"
+            self.upload_card.update_value(f"{self.engine.results['upload']:.2f}")
         if self.engine.results['ping']:
-            self.ping_card.children[1].text = f"{self.engine.results['ping']:.1f}"
+            self.ping_card.update_value(f"{self.engine.results['ping']:.1f}")
+        if self.engine.results['server']:
+            self.server_card.update_value(self.engine.results['server'][:20])
     
     def _test_complete(self):
         """Called when test is complete"""
         self.test_button.disabled = False
-        self.status_label.text = "Test completed!"
+        if self.engine.results['download']:
+            self.status_label.text = "✓ Test completed!"
+        else:
+            self.status_label.text = "✗ Test failed!"
         self.progress_bar.value = 100
     
     def show_history(self, instance):
@@ -362,7 +435,12 @@ class HistoryScreen(MDScreen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         
-        main_layout = MDBoxLayout(orientation='vertical', padding=dp(15), spacing=dp(10))
+        main_layout = MDBoxLayout(
+            orientation='vertical',
+            padding=dp(15),
+            spacing=dp(10),
+            md_bg_color=(0.95, 0.95, 0.95, 1)
+        )
         
         # Header
         header = MDLabel(
@@ -403,15 +481,15 @@ class HistoryScreen(MDScreen):
             return
         
         for i, result in enumerate(reversed(list(history)), 1):
-            text = (f"Test {len(list(history)) - i + 1}: "
-                   f"↓ {result['download']:.1f} Mbps | "
-                   f"↑ {result['upload']:.1f} Mbps | "
-                   f"Ping {result['ping']:.1f} ms")
-            item = OneLineListItem(text=text)
-            self.history_list.add_widget(item)
-            
-            if i < len(history):
-                self.history_list.add_widget(MDDivider())
+            if result.get('download') and result.get('upload'):
+                text = (f"Test {len(list(history)) - i + 1}: "
+                       f"↓ {result['download']:.1f}Mbps | "
+                       f"↑ {result['upload']:.1f}Mbps")
+                item = OneLineListItem(text=text)
+                self.history_list.add_widget(item)
+                
+                if i < len(list(history)):
+                    self.history_list.add_widget(MDDivider())
     
     def go_back(self, instance):
         """Return to home screen"""
@@ -424,7 +502,12 @@ class SettingsScreen(MDScreen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         
-        main_layout = MDBoxLayout(orientation='vertical', padding=dp(15), spacing=dp(10))
+        main_layout = MDBoxLayout(
+            orientation='vertical',
+            padding=dp(15),
+            spacing=dp(10),
+            md_bg_color=(0.95, 0.95, 0.95, 1)
+        )
         
         # Header
         header = MDLabel(
@@ -444,24 +527,16 @@ class SettingsScreen(MDScreen):
             spacing=dp(15),
             size_hint_y=None,
             height=dp(300),
-            radius=[dp(15)]
+            radius=[dp(15)],
+            md_bg_color=(1, 1, 1, 1)
         )
-        
-        # Theme selection
-        theme_label = MDLabel(
-            text="Theme",
-            font_style='Body1',
-            size_hint_y=None,
-            height=dp(30)
-        )
-        settings_card.add_widget(theme_label)
         
         info_label = MDLabel(
-            text="SpeedyTest v1.0\n\nA polished speed testing application using KivyMD.\n\nPowered by speedtest-cli",
+            text="SpeedyTest v1.0\n\nA polished speed testing application using KivyMD.\n\nPowered by speedtest-cli\n\nInstall speedtest-cli:\npip install speedtest-cli",
             font_style='Body2',
             theme_text_color='Hint',
             size_hint_y=None,
-            height=dp(150)
+            height=dp(200)
         )
         settings_card.add_widget(info_label)
         
@@ -487,6 +562,7 @@ class SpeedyTestApp(MDApp):
     """Main application class"""
     
     def build(self):
+        self.title = "SpeedyTest"
         self.theme_cls.primary_palette = "Blue"
         self.theme_cls.primary_hue = "600"
         self.theme_cls.theme_style = "Light"
