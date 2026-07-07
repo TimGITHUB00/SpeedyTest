@@ -1,19 +1,18 @@
 """
 SpeedyTest - A polished speed testing application
-Similar to Ookla's Speedtest but with a modern KivyMD interface
-Android-compatible version
+Fully Android-compatible version with proper initialization
 """
 
 import threading
 import json
 import os
+import sys
 from datetime import datetime
-from collections import deque
 
 from kivy.core.window import Window
 from kivy.clock import Clock, mainthread
 from kivy.metrics import dp
-from kivy.uix.popup import Popup
+from kivy.logger import Logger
 
 from kivymd.app import MDApp
 from kivymd.uix.screen import MDScreen
@@ -27,13 +26,16 @@ from kivymd.uix.gridlayout import MDGridLayout
 from kivymd.uix.boxlayout import MDBoxLayout
 from kivymd.uix.list import MDList, OneLineListItem
 from kivymd.uix.divider import MDDivider
-from kivymd.uix.spinner import MDSpinner
-from kivy.uix.image import Image
+
+Logger.info('SpeedyTest: Starting application')
 
 try:
     import speedtest
-except ImportError:
-    speedtest = None
+    HAS_SPEEDTEST = True
+    Logger.info('SpeedyTest: speedtest module found')
+except ImportError as e:
+    HAS_SPEEDTEST = False
+    Logger.warning(f'SpeedyTest: speedtest module not found: {e}')
 
 Window.size = (400, 800)
 
@@ -42,7 +44,7 @@ class SpeedtestEngine:
     """Handles all speedtest operations"""
     
     def __init__(self):
-        self.speedtest = None
+        self.speedtest_obj = None
         self.is_testing = False
         self.results = {
             'download': None,
@@ -53,10 +55,27 @@ class SpeedtestEngine:
             'isp': None,
             'ip': None
         }
-        self.history = deque(maxlen=10)
+        self.history = []
         self.current_progress = 0
         self.status_message = ""
         self.load_history()
+        Logger.info('SpeedyTest: Engine initialized')
+        
+    def get_history_path(self):
+        """Get path for history file"""
+        try:
+            from kivy.garden.filechooser import platform
+            if platform == 'android':
+                from android.permissions import Permission, request_permissions
+                from pathlib import Path
+                app_dir = str(Path.home() / '.speedytest')
+            else:
+                app_dir = os.path.expanduser('~/.speedytest')
+        except:
+            app_dir = os.path.expanduser('~/.speedytest')
+        
+        os.makedirs(app_dir, exist_ok=True)
+        return os.path.join(app_dir, 'history.json')
         
     def load_history(self):
         """Load history from file"""
@@ -64,131 +83,110 @@ class SpeedtestEngine:
             history_file = self.get_history_path()
             if os.path.exists(history_file):
                 with open(history_file, 'r') as f:
-                    saved_history = json.load(f)
-                    self.history = deque(saved_history, maxlen=10)
+                    self.history = json.load(f)
+                    if len(self.history) > 10:
+                        self.history = self.history[-10:]
+                Logger.info(f'SpeedyTest: Loaded {len(self.history)} history items')
         except Exception as e:
-            print(f"Error loading history: {e}")
+            Logger.error(f'SpeedyTest: Error loading history: {e}')
+            self.history = []
     
     def save_history(self):
         """Save history to file"""
         try:
             history_file = self.get_history_path()
-            os.makedirs(os.path.dirname(history_file), exist_ok=True)
             with open(history_file, 'w') as f:
-                json.dump(list(self.history), f)
+                json.dump(self.history, f)
+            Logger.info('SpeedyTest: History saved')
         except Exception as e:
-            print(f"Error saving history: {e}")
-    
-    @staticmethod
-    def get_history_path():
-        """Get path for history file"""
-        app_dir = os.path.expanduser('~/.speedytest')
-        return os.path.join(app_dir, 'history.json')
+            Logger.error(f'SpeedyTest: Error saving history: {e}')
         
-    def get_best_server(self, callback=None):
-        """Find the best server"""
-        try:
-            if speedtest is None:
-                raise Exception("speedtest module not installed")
-            
-            self.status_message = "Finding best server..."
-            if callback:
-                callback(self.status_message, 10)
-            
-            self.speedtest = speedtest.Speedtest()
-            self.speedtest.get_servers()
-            self.speedtest.get_best_server()
-            
-            self.status_message = "Server found!"
-            if callback:
-                callback(self.status_message, 20)
-                
-        except Exception as e:
-            self.status_message = f"Error: {str(e)}"
-            print(f"Server error: {e}")
-            if callback:
-                callback(self.status_message, 0)
-    
-    def test_download(self, callback=None):
-        """Test download speed"""
-        try:
-            self.status_message = "Testing download speed..."
-            if callback:
-                callback(self.status_message, 30)
-            
-            self.speedtest.download()
-            self.results['download'] = self.speedtest.results.download / 1_000_000  # Convert to Mbps
-            
-            if callback:
-                callback(self.status_message, 60)
-            
-        except Exception as e:
-            self.status_message = f"Download error: {str(e)}"
-            print(f"Download error: {e}")
-    
-    def test_upload(self, callback=None):
-        """Test upload speed"""
-        try:
-            self.status_message = "Testing upload speed..."
-            if callback:
-                callback(self.status_message, 60)
-            
-            self.speedtest.upload()
-            self.results['upload'] = self.speedtest.results.upload / 1_000_000  # Convert to Mbps
-            
-            if callback:
-                callback(self.status_message, 90)
-            
-        except Exception as e:
-            self.status_message = f"Upload error: {str(e)}"
-            print(f"Upload error: {e}")
-    
-    def get_ping(self):
-        """Get ping value"""
-        try:
-            self.results['ping'] = self.speedtest.results.ping
-        except Exception as e:
-            self.status_message = f"Ping error: {str(e)}"
-            print(f"Ping error: {e}")
-    
     def run_full_test(self, callback=None):
         """Run complete speed test"""
         self.is_testing = True
         self.current_progress = 0
         
         try:
-            if speedtest is None:
-                self.status_message = "speedtest-cli not installed"
+            if not HAS_SPEEDTEST:
+                self.status_message = "speedtest-cli not installed. Install with: pip install speedtest-cli"
+                Logger.error(self.status_message)
                 if callback:
                     callback(self.status_message, 0)
                 self.is_testing = False
                 return False
             
-            # Get best server
-            self.get_best_server(callback)
+            # Initialize speedtest
+            self.status_message = "Initializing speedtest..."
+            if callback:
+                callback(self.status_message, 5)
+            Logger.info('SpeedyTest: Initializing speedtest')
             
-            # Get ping
-            self.get_ping()
+            self.speedtest_obj = speedtest.Speedtest()
+            
+            # Get servers
+            self.status_message = "Finding best server..."
+            if callback:
+                callback(self.status_message, 10)
+            Logger.info('SpeedyTest: Getting servers')
+            
+            self.speedtest_obj.get_servers()
+            self.speedtest_obj.get_best_server()
+            
+            self.status_message = "Server selected"
+            if callback:
+                callback(self.status_message, 20)
+            Logger.info('SpeedyTest: Server selected')
             
             # Test download
-            self.test_download(callback)
+            self.status_message = "Testing download speed..."
+            if callback:
+                callback(self.status_message, 30)
+            Logger.info('SpeedyTest: Starting download test')
+            
+            self.speedtest_obj.download()
+            self.results['download'] = self.speedtest_obj.results.download / 1_000_000
+            
+            if callback:
+                callback(self.status_message, 60)
+            Logger.info(f'SpeedyTest: Download: {self.results["download"]:.2f} Mbps')
             
             # Test upload
-            self.test_upload(callback)
+            self.status_message = "Testing upload speed..."
+            if callback:
+                callback(self.status_message, 60)
+            Logger.info('SpeedyTest: Starting upload test')
             
-            # Store results
+            self.speedtest_obj.upload()
+            self.results['upload'] = self.speedtest_obj.results.upload / 1_000_000
+            
+            if callback:
+                callback(self.status_message, 90)
+            Logger.info(f'SpeedyTest: Upload: {self.results["upload"]:.2f} Mbps')
+            
+            # Get ping
+            self.results['ping'] = self.speedtest_obj.results.ping
             self.results['timestamp'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
             try:
-                server_info = self.speedtest.get_best_server()
+                server_info = self.speedtest_obj.get_best_server()
                 self.results['server'] = server_info.get('sponsor', 'Unknown')
             except:
                 self.results['server'] = 'Unknown'
             
-            self.results['isp'] = self.speedtest.results.isp
-            self.results['ip'] = self.speedtest.results.ip
+            try:
+                self.results['isp'] = self.speedtest_obj.results.isp
+            except:
+                self.results['isp'] = 'Unknown'
+            
+            try:
+                self.results['ip'] = self.speedtest_obj.results.ip
+            except:
+                self.results['ip'] = 'Unknown'
             
             # Save to history
             self.history.append(self.results.copy())
+            if len(self.history) > 10:
+                self.history = self.history[-10:]
             self.save_history()
             
             self.status_message = "Test complete!"
@@ -196,12 +194,13 @@ class SpeedtestEngine:
             if callback:
                 callback(self.status_message, 100)
             
+            Logger.info('SpeedyTest: Test completed successfully')
             self.is_testing = False
             return True
             
         except Exception as e:
             self.status_message = f"Test failed: {str(e)}"
-            print(f"Test error: {e}")
+            Logger.error(f'SpeedyTest: Test error: {e}')
             if callback:
                 callback(self.status_message, 0)
             self.is_testing = False
@@ -222,7 +221,6 @@ class ResultsCard(MDCard):
         self.elevation = 2
         self.md_bg_color = (1, 1, 1, 1)
         
-        # Title
         title_label = MDLabel(
             text=title,
             font_style='Caption',
@@ -232,7 +230,6 @@ class ResultsCard(MDCard):
         )
         self.add_widget(title_label)
         
-        # Value
         self.value_label = MDLabel(
             text=str(value),
             font_style='H3',
@@ -243,7 +240,6 @@ class ResultsCard(MDCard):
         )
         self.add_widget(self.value_label)
         
-        # Unit
         unit_label = MDLabel(
             text=unit,
             font_style='Body2',
@@ -263,6 +259,8 @@ class HomeScreen(MDScreen):
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        Logger.info('SpeedyTest: Creating HomeScreen')
+        
         self.engine = SpeedtestEngine()
         self.test_thread = None
         
@@ -273,7 +271,6 @@ class HomeScreen(MDScreen):
             md_bg_color=(0.95, 0.95, 0.95, 1)
         )
         
-        # Header
         header = MDLabel(
             text="SpeedyTest",
             font_style='H3',
@@ -284,7 +281,6 @@ class HomeScreen(MDScreen):
         )
         main_layout.add_widget(header)
         
-        # Scroll view for results
         scroll = MDScrollView()
         scroll_content = MDGridLayout(
             cols=2,
@@ -325,7 +321,6 @@ class HomeScreen(MDScreen):
         scroll.add_widget(scroll_content)
         main_layout.add_widget(scroll)
         
-        # Status and progress
         status_box = MDBoxLayout(
             orientation='vertical',
             size_hint_y=None,
@@ -351,7 +346,6 @@ class HomeScreen(MDScreen):
         
         main_layout.add_widget(status_box)
         
-        # Buttons
         button_layout = MDBoxLayout(
             size_hint_y=None,
             height=dp(50),
@@ -375,35 +369,42 @@ class HomeScreen(MDScreen):
         main_layout.add_widget(button_layout)
         
         self.add_widget(main_layout)
+        Logger.info('SpeedyTest: HomeScreen created')
     
     def start_test(self, instance):
         """Start the speed test"""
+        Logger.info('SpeedyTest: Start test clicked')
+        
         if self.engine.is_testing:
+            Logger.warning('SpeedyTest: Test already in progress')
             return
         
-        if speedtest is None:
+        if not HAS_SPEEDTEST:
             self.status_label.text = "Error: speedtest-cli not installed"
+            Logger.error('SpeedyTest: speedtest-cli not available')
             return
         
         self.test_button.disabled = True
-        self.status_label.text = "Initializing test..."
+        self.status_label.text = "Initializing..."
         self.progress_bar.value = 0
         
         self.test_thread = threading.Thread(target=self._run_test_thread, daemon=True)
         self.test_thread.start()
+        Logger.info('SpeedyTest: Test thread started')
     
     def _run_test_thread(self):
         """Run test in background thread"""
+        Logger.info('SpeedyTest: Running test in background')
         self.engine.run_full_test(callback=self._update_ui)
         Clock.schedule_once(lambda dt: self._test_complete(), 0)
     
     @mainthread
     def _update_ui(self, status, progress):
         """Update UI from background thread"""
+        Logger.debug(f'SpeedyTest: UI update - {status} ({progress}%)')
         self.status_label.text = status
         self.progress_bar.value = progress
         
-        # Update cards with current results
         if self.engine.results['download']:
             self.download_card.update_value(f"{self.engine.results['download']:.2f}")
         if self.engine.results['upload']:
@@ -415,6 +416,7 @@ class HomeScreen(MDScreen):
     
     def _test_complete(self):
         """Called when test is complete"""
+        Logger.info('SpeedyTest: Test complete')
         self.test_button.disabled = False
         if self.engine.results['download']:
             self.status_label.text = "✓ Test completed!"
@@ -424,6 +426,7 @@ class HomeScreen(MDScreen):
     
     def show_history(self, instance):
         """Show test history"""
+        Logger.info('SpeedyTest: Showing history')
         history_screen = self.manager.get_screen('history')
         history_screen.load_history(self.engine.history)
         self.manager.current = 'history'
@@ -434,6 +437,7 @@ class HistoryScreen(MDScreen):
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        Logger.info('SpeedyTest: Creating HistoryScreen')
         
         main_layout = MDBoxLayout(
             orientation='vertical',
@@ -442,7 +446,6 @@ class HistoryScreen(MDScreen):
             md_bg_color=(0.95, 0.95, 0.95, 1)
         )
         
-        # Header
         header = MDLabel(
             text="Test History",
             font_style='H4',
@@ -453,13 +456,11 @@ class HistoryScreen(MDScreen):
         )
         main_layout.add_widget(header)
         
-        # Scroll view for history
         scroll = MDScrollView()
         self.history_list = MDList()
         scroll.add_widget(self.history_list)
         main_layout.add_widget(scroll)
         
-        # Back button
         back_button = MDFlatButton(
             text="← BACK",
             size_hint_y=None,
@@ -480,15 +481,15 @@ class HistoryScreen(MDScreen):
             )
             return
         
-        for i, result in enumerate(reversed(list(history)), 1):
+        for i, result in enumerate(reversed(history), 1):
             if result.get('download') and result.get('upload'):
-                text = (f"Test {len(list(history)) - i + 1}: "
+                text = (f"Test {len(history) - i + 1}: "
                        f"↓ {result['download']:.1f}Mbps | "
                        f"↑ {result['upload']:.1f}Mbps")
                 item = OneLineListItem(text=text)
                 self.history_list.add_widget(item)
                 
-                if i < len(list(history)):
+                if i < len(history):
                     self.history_list.add_widget(MDDivider())
     
     def go_back(self, instance):
@@ -501,6 +502,7 @@ class SettingsScreen(MDScreen):
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        Logger.info('SpeedyTest: Creating SettingsScreen')
         
         main_layout = MDBoxLayout(
             orientation='vertical',
@@ -509,7 +511,6 @@ class SettingsScreen(MDScreen):
             md_bg_color=(0.95, 0.95, 0.95, 1)
         )
         
-        # Header
         header = MDLabel(
             text="Settings",
             font_style='H4',
@@ -520,7 +521,6 @@ class SettingsScreen(MDScreen):
         )
         main_layout.add_widget(header)
         
-        # Settings content
         settings_card = MDCard(
             orientation='vertical',
             padding=dp(15),
@@ -531,8 +531,10 @@ class SettingsScreen(MDScreen):
             md_bg_color=(1, 1, 1, 1)
         )
         
+        status_text = "✓ speedtest-cli installed" if HAS_SPEEDTEST else "✗ speedtest-cli NOT installed"
+        
         info_label = MDLabel(
-            text="SpeedyTest v1.0\n\nA polished speed testing application using KivyMD.\n\nPowered by speedtest-cli\n\nInstall speedtest-cli:\npip install speedtest-cli",
+            text=f"SpeedyTest v1.0\n\n{status_text}\n\nA polished speed testing application using KivyMD.\n\nPowered by speedtest-cli",
             font_style='Body2',
             theme_text_color='Hint',
             size_hint_y=None,
@@ -542,7 +544,6 @@ class SettingsScreen(MDScreen):
         
         main_layout.add_widget(settings_card)
         
-        # Back button
         back_button = MDFlatButton(
             text="← BACK",
             size_hint_y=None,
@@ -562,6 +563,7 @@ class SpeedyTestApp(MDApp):
     """Main application class"""
     
     def build(self):
+        Logger.info('SpeedyTest: Building app')
         self.title = "SpeedyTest"
         self.theme_cls.primary_palette = "Blue"
         self.theme_cls.primary_hue = "600"
@@ -569,14 +571,15 @@ class SpeedyTestApp(MDApp):
         
         screen_manager = MDScreenManager()
         
-        # Add screens
         screen_manager.add_widget(HomeScreen(name='home'))
         screen_manager.add_widget(HistoryScreen(name='history'))
         screen_manager.add_widget(SettingsScreen(name='settings'))
         
+        Logger.info('SpeedyTest: App build complete')
         return screen_manager
 
 
 if __name__ == '__main__':
+    Logger.info('SpeedyTest: Starting application')
     app = SpeedyTestApp()
     app.run()
